@@ -1268,7 +1268,9 @@ renderer.xr.addEventListener("sessionend", () => {
   controls.update();
 });
 
-// Джойстик, товчны удирдлага
+// ---------- VR удирдлага ----------
+// Зүүн джойстик: алхах · Баруун джойстик: эргэх · X: цэс нээх/хаах
+// A: доош давхар · B / Y: дээш давхар · Баруун гох: цэсний товч / хаалга дарах
 const SPEED = 1.6;                 // алхах хурд (м/сек)
 let turnReady = true;
 const pressed = {};                // товч дарагдсан эсэх (нэг удаа л ажиллуулахын тулд)
@@ -1281,15 +1283,169 @@ function changeFloor(step) {
   dolly.position.y = floorHeights[floorIndex];
 }
 
+// Удирдлага бүрээс туяа (лазер) гаргана — цэс, хаалга руу чиглүүлж дарна
+const vrCtrls = [];
+for (let i = 0; i < 2; i++) {
+  const c = renderer.xr.getController(i);
+  c.addEventListener("connected", e => { c.userData.hand = e.data.handedness; c.userData.src = e.data; });
+  c.addEventListener("disconnected", () => { c.userData.src = null; });
+  const ray = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3(0, 0, -1)]),
+    new THREE.LineBasicMaterial({ color: 0x7fffd0, transparent: true, opacity: 0.8 }));
+  ray.scale.z = 4; ray.name = "ray";
+  c.add(ray);
+  dolly.add(c);
+  vrCtrls.push(c);
+}
+const rightCtrl = () => vrCtrls.find(c => c.userData.hand === "right") || vrCtrls[0];
+
+// --- VR доторх алдаа/мэдээллийн самбар (нүдний өмнө, доод талд) ---
+const vrMsgCanvas = document.createElement("canvas"); vrMsgCanvas.width = 1024; vrMsgCanvas.height = 160;
+const vrMsgTex = new THREE.CanvasTexture(vrMsgCanvas); vrMsgTex.colorSpace = THREE.SRGBColorSpace;
+const vrMsg = new THREE.Mesh(new THREE.PlaneGeometry(0.7, 0.11),
+  new THREE.MeshBasicMaterial({ map: vrMsgTex, transparent: true, depthTest: false, toneMapped: false, fog: false }));
+vrMsg.position.set(0, -0.32, -0.9); vrMsg.renderOrder = 30; vrMsg.visible = false;
+camera.add(vrMsg);
+let vrMsgUntil = 0;
+function vrSay(text, color = "#c9ffe2", ms = 3500) {
+  const g = vrMsgCanvas.getContext("2d");
+  g.clearRect(0, 0, 1024, 160);
+  g.fillStyle = "rgba(10,20,30,0.85)"; g.beginPath(); g.roundRect(4, 4, 1016, 152, 24); g.fill();
+  g.fillStyle = color; g.font = "bold 40px system-ui, sans-serif"; g.textAlign = "center"; g.textBaseline = "middle";
+  const words = String(text).slice(0, 140);
+  g.fillText(words.slice(0, 48), 512, words.length > 48 ? 55 : 80);
+  if (words.length > 48) g.fillText(words.slice(48, 96), 512, 110);
+  vrMsgTex.needsUpdate = true; vrMsg.visible = true; vrMsgUntil = performance.now() + ms;
+}
+
+// --- VR цэс: айл сонгох ---
+const MENU_W = 1024, MENU_H = 760;
+const menuCanvas = document.createElement("canvas"); menuCanvas.width = MENU_W; menuCanvas.height = MENU_H;
+const menuTex = new THREE.CanvasTexture(menuCanvas); menuTex.colorSpace = THREE.SRGBColorSpace;
+const menu = new THREE.Mesh(new THREE.PlaneGeometry(0.9, 0.9 * MENU_H / MENU_W),
+  new THREE.MeshBasicMaterial({ map: menuTex, transparent: true, toneMapped: false, fog: false, side: THREE.DoubleSide }));
+menu.visible = false; menu.renderOrder = 20;
+dolly.add(menu);
+let menuButtons = [], menuHover = -1, vrUnit = null;
+function drawMenu() {
+  const g = menuCanvas.getContext("2d");
+  g.clearRect(0, 0, MENU_W, MENU_H);
+  g.fillStyle = "rgba(14,24,36,0.94)"; g.beginPath(); g.roundRect(0, 0, MENU_W, MENU_H, 36); g.fill();
+  g.strokeStyle = "#1de27e"; g.lineWidth = 6; g.stroke();
+  g.fillStyle = "#fff"; g.font = "bold 50px system-ui, sans-serif"; g.textAlign = "left"; g.textBaseline = "middle";
+  g.fillText("🏢 Айл сонгох", 40, 60);
+  g.font = "26px system-ui, sans-serif"; g.fillStyle = "#9fb3c8";
+  g.fillText("Баруун гарын туяагаар чиглүүлээд гохоо дар · X: хаах", 40, 112);
+  menuButtons = [];
+  let y = 150;
+  const rows = FLOORS.map((f, i) => ({ f, i })).filter(r => (r.f.units || []).some(u => u.door)).reverse();
+  for (const { f } of rows) {
+    g.fillStyle = "#c9d6e3"; g.font = "bold 30px system-ui, sans-serif"; g.textAlign = "left";
+    g.fillText(f.label.split(". ")[0] + "-р давхар", 40, y + 38);
+    let x = 250;
+    for (const u of f.units.filter(u => u.door)) {
+      menuButtons.push({ x, y, w: 165, h: 76, label: "№" + u.no, act: () => selectVrUnit(u), sel: vrUnit === u });
+      x += 180;
+    }
+    y += 92;
+  }
+  y += 16;
+  if (vrUnit) {
+    menuButtons.push({ x: 40, y, w: 460, h: 90, label: "🚪 Шууд хаалган дээр", act: () => vrGoDoor(vrUnit), big: true });
+    menuButtons.push({ x: 524, y, w: 460, h: 90, label: "🚶 Гудамжнаас алхах", act: () => vrGoStreet(), big: true });
+  } else {
+    g.fillStyle = "#9fb3c8"; g.font = "28px system-ui, sans-serif"; g.textAlign = "left";
+    g.fillText("Дээрээс айлаа сонгоно уу", 40, y + 45);
+  }
+  menuButtons.push({ x: MENU_W - 150, y: 30, w: 110, h: 64, label: "✕", act: () => toggleMenu(false) });
+  menuButtons.forEach((b, i) => {
+    g.fillStyle = b.sel ? "#1de27e" : i === menuHover ? "#3a6ea5" : b.big ? "#1e5aa0" : "#26394d";
+    g.beginPath(); g.roundRect(b.x, b.y, b.w, b.h, 16); g.fill();
+    g.fillStyle = b.sel ? "#062" : "#fff";
+    g.font = `bold ${b.big ? 34 : 36}px system-ui, sans-serif`; g.textAlign = "center";
+    g.fillText(b.label, b.x + b.w / 2, b.y + b.h / 2 + 2);
+  });
+  menuTex.needsUpdate = true;
+}
+function toggleMenu(on = !menu.visible) {
+  menu.visible = on;
+  if (!on) return;
+  // нүдний өмнө 0.9 м зайд, бага зэрэг доор байрлуулна
+  const head = renderer.xr.getCamera(); head.updateMatrixWorld();
+  const hp = new THREE.Vector3().setFromMatrixPosition(head.matrixWorld);
+  head.getWorldDirection(dir); dir.y = 0; dir.normalize();
+  const wp = hp.clone().addScaledVector(dir, 0.9); wp.y -= 0.12;
+  menu.position.copy(dolly.worldToLocal(wp.clone()));
+  menu.lookAt(hp);                                   // world lookAt — dolly-ийн эргэлтийг тооцно
+  menuHover = -1; drawMenu();
+}
+function selectVrUnit(u) {
+  vrUnit = u; showRoute(u); drawMenu();
+  vrSay(`№${u.no} сонголоо — ногоон сумыг дагаарай`);
+}
+function vrGoDoor(u) {
+  dolly.position.set(u.spawn[0], u.floor_z, u.spawn[2]);
+  dolly.rotation.y = Math.atan2(-(u.door[0] - u.spawn[0]), -(u.door[2] - u.spawn[2]));
+  floorIndex = Math.max(0, floorHeights.indexOf(u.floor_z));
+  toggleMenu(false);
+  vrSay(`№${u.no} айлын хаалга · гохоор хаалгыг тогшино уу`);
+}
+function vrGoStreet() {
+  dolly.position.set(-1, -0.2, 21.6); dolly.rotation.y = 0; floorIndex = 0;
+  toggleMenu(false);
+  vrSay("Ногоон сумыг дагаж лифт рүү алхаарай · B: дээш давхар");
+}
+
+// Туяагаар цэс эсвэл хаалга онгох
+const vrRay = new THREE.Raycaster();
+function ctrlRay(c) {
+  c.updateMatrixWorld();
+  const m = new THREE.Matrix4().extractRotation(c.matrixWorld);
+  vrRay.ray.origin.setFromMatrixPosition(c.matrixWorld);
+  vrRay.ray.direction.set(0, 0, -1).applyMatrix4(m);
+  return vrRay;
+}
+function menuHit(c) {
+  const hit = ctrlRay(c).intersectObject(menu, false)[0];
+  if (!hit) return null;
+  const px = hit.uv.x * MENU_W, py = (1 - hit.uv.y) * MENU_H;
+  return { hit, i: menuButtons.findIndex(b => px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h) };
+}
+async function vrTrigger(c) {
+  if (menu.visible) {
+    const m = menuHit(c);
+    if (m && m.i >= 0) menuButtons[m.i].act();
+    return;
+  }
+  const hit = ctrlRay(c).intersectObjects(doors.filter(d => doorGroups[d.floorNode].visible).map(d => d.panel))[0];
+  let o = hit && hit.distance < 3.5 ? hit.object : null;
+  while (o && !o.userData.door) o = o.parent;
+  if (!o) return;
+  const d = o.userData.door;
+  if (d.unit && d.target === 0) {                     // айлын хаалга: тогшоод онгойно
+    vrSay("тог... тог... тог...");
+    for (let k = 0; k < 3; k++) { knockSound(); await sleep(380); }
+    await sleep(600);
+    toggleDoor(d, true);
+    vrSay(`Тавтай морил! №${d.unit.no}`);
+  } else toggleDoor(d);
+}
+
+function stickOf(gp) {                                 // Quest: axes[2],[3]; бусад: [0],[1]
+  const a = gp.axes || [];
+  const x = Math.abs(a[2] || 0) + Math.abs(a[3] || 0) > Math.abs(a[0] || 0) + Math.abs(a[1] || 0) ? a[2] : a[0];
+  const y = x === a[2] ? a[3] : a[1];
+  return [x || 0, y || 0];
+}
 function handleVR(dt) {
   const session = renderer.xr.getSession();
   if (!session) return;
-  for (const source of session.inputSources) {
-    const gp = source.gamepad;
+  for (const c of vrCtrls) {
+    const src = c.userData.src, gp = src && src.gamepad;
     if (!gp) continue;
-    const x = gp.axes[2] || 0, y = gp.axes[3] || 0;
-    if (source.handedness === "left") {
-      // Харж буй чиглэлдээ алхана (дээш доош биш, зөвхөн хэвтээ)
+    const hand = src.handedness;
+    const [x, y] = stickOf(gp);
+    if (hand === "left") {
+      // Харж буй чиглэлдээ алхана (зөвхөн хэвтээ)
       if (Math.abs(x) > 0.15 || Math.abs(y) > 0.15) {
         renderer.xr.getCamera().getWorldDirection(dir);
         dir.y = 0; dir.normalize();
@@ -1297,24 +1453,36 @@ function handleVR(dt) {
         dolly.position.addScaledVector(dir, -y * SPEED * dt);
         dolly.position.addScaledVector(right, x * SPEED * dt);
       }
-    } else if (source.handedness === "right") {
+    } else if (hand === "right") {
       // 30°-аар алхам алхмаар эргэнэ (толгой эргэхээс сэргийлнэ)
-      if (Math.abs(x) > 0.7 && turnReady) {
-        dolly.rotation.y -= Math.sign(x) * Math.PI / 6;
-        turnReady = false;
-      } else if (Math.abs(x) < 0.3) {
-        turnReady = true;
-      }
+      if (Math.abs(x) > 0.7 && turnReady) { dolly.rotation.y -= Math.sign(x) * Math.PI / 6; turnReady = false; }
+      else if (Math.abs(x) < 0.3) turnReady = true;
     }
-    // A/X (товч 4) = доош давхар, B/Y (товч 5) = дээш давхар
-    for (const [btn, step] of [[4, -1], [5, 1]]) {
-      const key = source.handedness + btn;
-      const isDown = gp.buttons[btn] && gp.buttons[btn].pressed;
-      if (isDown && !pressed[key]) changeFloor(step);
-      pressed[key] = isDown;
-    }
+    const once = (btn, fn) => {                        // товч дарагдах мөчид нэг удаа
+      const key = hand + btn, down = !!(gp.buttons[btn] && gp.buttons[btn].pressed);
+      if (down && !pressed[key]) fn();
+      pressed[key] = down;
+    };
+    once(0, () => vrTrigger(c));                       // гох
+    if (hand === "left") { once(4, () => toggleMenu()); once(5, () => changeFloor(1)); }   // X, Y
+    else { once(4, () => changeFloor(-1)); once(5, () => changeFloor(1)); }              // A, B
+    c.getObjectByName("ray").visible = hand === "right" || menu.visible;
   }
+  // цэсний товч дээр туяа очиход тодруулна
+  if (menu.visible) {
+    const m = menuHit(rightCtrl());
+    const i = m ? m.i : -1;
+    if (i !== menuHover) { menuHover = i; drawMenu(); }
+  }
+  // шат, налуу дээр хөл доорх шалыг дагана
+  const hp = new THREE.Vector3().setFromMatrixPosition(renderer.xr.getCamera().matrixWorld);
+  const gy = groundAt(new THREE.Vector3(hp.x, dolly.position.y + 1.0, hp.z));
+  if (gy !== null && Math.abs(gy - dolly.position.y) < 0.6) dolly.position.y += (gy - dolly.position.y) * Math.min(1, dt * 8);
+  if (vrMsg.visible && performance.now() > vrMsgUntil) vrMsg.visible = false;
 }
+renderer.xr.addEventListener("sessionstart", () => {
+  setTimeout(() => { toggleMenu(true); vrSay("X товч: цэс · зүүн джойстик: алхах", "#c9ffe2", 6000); }, 600);
+});
 
 addEventListener("resize", () => {
   camera.aspect = innerWidth / innerHeight;
@@ -1420,7 +1588,8 @@ document.getElementById("routeOn").onchange = e => e.target.checked
 const errBox = document.createElement("div");
 errBox.style.cssText = "position:fixed;left:10px;bottom:60px;max-width:60%;background:#b00020;color:#fff;padding:8px 12px;border-radius:8px;font:13px monospace;display:none;z-index:99;white-space:pre-wrap";
 document.body.appendChild(errBox);
-function showErr(m) { errBox.style.display = "block"; errBox.textContent = "АЛДАА: " + m; console.error(m); }
+function showErr(m) { errBox.style.display = "block"; errBox.textContent = "АЛДАА: " + m; console.error(m);
+  try { if (renderer.xr.isPresenting) vrSay("АЛДАА: " + m, "#ff8a8a", 15000); } catch (e) {} }
 addEventListener("error", e => showErr(e.message));
 addEventListener("unhandledrejection", e => showErr(e.reason && (e.reason.stack || e.reason)));
 let loopErr = false;
@@ -1440,10 +1609,11 @@ function mainLoop() {
     controls.target.lerpVectors(fly.fromT, fly.toT, e);
     if (k >= 1) fly = null;
   }
+  if (renderer.xr.isPresenting) { try { handleVR(dt); } catch (e) { if (!loopErr) { loopErr = true; showErr(e.stack || e); } } }
   animateDoors(dt);
   animateElevator(dt);
   animateRoute();
-  if (renderer.xr.isPresenting) handleVR(dt);
+  if (renderer.xr.isPresenting) {}
   else if (walk.on) updateWalk(dt);
   else controls.update();
   renderer.render(scene, camera);

@@ -1,5 +1,5 @@
 // NS building — интернэтгүй ажиллах хэсэг (service worker)
-const CACHE = "ns-building-20261111-171439";
+const CACHE = "ns-building-20261111-174624";
 const CORE = ["./", "./index.html", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", e => {
